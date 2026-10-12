@@ -93,18 +93,78 @@ def title_sim(a, b):
     return base
 
 
+def _is_explicit(h):
+    return h.get("trackExplicitness") == "explicit"
+
+
+def _is_clean(h):
+    return h.get("trackExplicitness") == "cleaned"
+
+
+def _split_candidates(scored):
+    """scored = [(score, hit), ...] sorted desc. Return (primary, clean_alt).
+
+    Primary prefers the explicit version (DJ crates); clean_alt is the
+    cleaned version when one exists, for radio gigs.
+    """
+    if not scored:
+        return None, None
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0][1]
+    expl = next((h for _, h in scored if _is_explicit(h)), None)
+    primary = expl or best
+    primary_id = primary.get("trackId")
+    clean = next((h for _, h in scored
+                  if _is_clean(h) and h.get("trackId") != primary_id), None)
+    return primary, clean
+
+
+def _clean_fallback(artist, title, primary):
+    """One extra search for the cleaned version, for radio gigs."""
+    if not primary or not _is_explicit(primary):
+        return None
+    try:
+        results = itunes_search(f"{artist} {title} clean")
+    except Exception:
+        return None
+    anchor = first_content_token(title)
+    ca_toks = set(tokens(artist))
+    best, best_s = None, 0.0
+    for h in results:
+        if not _is_clean(h):
+            continue
+        if h.get("trackId") == primary.get("trackId"):
+            continue
+        cand_title = h.get("trackName", "")
+        if anchor and anchor not in set(tokens(cand_title)):
+            continue
+        ha_toks = set(tokens(h.get("artistName", "")))
+        if not ca_toks or not ha_toks:
+            continue
+        a_s = 2 * len(ca_toks & ha_toks) / (len(ca_toks) + len(ha_toks))
+        t_s = title_sim(title, cand_title)
+        s = 0.6 * a_s + 0.4 * t_s
+        if s > best_s:
+            best, best_s = h, s
+    return best if best_s >= 0.45 else None
+
+
 def match_dash_split(artist, title):
-    """Filename had 'Artist - Title': verify against Apple Music strictly."""
+    """Filename had 'Artist - Title': verify against Apple Music strictly.
+
+    Returns (primary, clean_alt, score): primary prefers the explicit
+    version, clean_alt is the cleaned version for radio gigs.
+    """
     anchor = first_content_token(title)
     cleaned = FT_CLAUSE.sub("", VERSION_TAGS.sub("", title))
+    ca_toks = set(tokens(artist))
     for query in (search_query(artist, title),
                   f"{artist} {' '.join(tokens(cleaned)[:3])}"):
         try:
             results = itunes_search(query)
         except Exception:
-            return None, 0.0
-        best, best_s = None, 0.0
-        ca_toks = set(tokens(artist))
+            return None, None, 0.0
+        scored = []
         for h in results:
             cand_title = h.get("trackName", "")
             if anchor and anchor not in set(tokens(cand_title)):
@@ -115,22 +175,30 @@ def match_dash_split(artist, title):
             a_s = 2 * len(ca_toks & ha_toks) / (len(ca_toks) + len(ha_toks))
             t_s = title_sim(title, cand_title)
             s = 0.6 * a_s + 0.4 * t_s
-            if s > best_s:
-                best, best_s = h, s
-        if best_s >= 0.45:
-            return best, best_s
-    return None, best_s
+            if s >= 0.45:
+                scored.append((s, h))
+        if scored:
+            primary, clean = _split_candidates(scored)
+            p_s = next(s for s, h in scored
+                       if h.get("trackId") == primary.get("trackId"))
+            if not clean:
+                clean = _clean_fallback(artist, title, primary)
+            return primary, clean, p_s
+    return None, None, 0.0
 
 
 def match_whole_stem(stem):
-    """No ' - ' in filename: search the whole stem, disambiguate."""
+    """No ' - ' in filename: search the whole stem, disambiguate.
+
+    Returns (primary, clean_alt, score).
+    """
     try:
         results = itunes_search(stem)
     except Exception:
-        return None, 0.0
+        return None, None, 0.0
     s_toks = tokens(stem)
     s_set = set(s_toks)
-    best, best_s = None, 0.0
+    scored = []
     for h in results:
         a_toks = tokens(h.get("artistName", ""))
         if not a_toks:
@@ -147,32 +215,66 @@ def match_whole_stem(stem):
             continue  # different song that shares words
         t_s = title_sim(remainder, h.get("trackName", ""))
         s = 0.5 * cov + 0.5 * t_s
-        if s > best_s:
-            best, best_s = h, s
-    return (best, best_s) if best_s >= 0.6 else (None, best_s)
+        if s >= 0.6:
+            scored.append((s, h))
+    if not scored:
+        return None, None, 0.0
+    primary, clean = _split_candidates(scored)
+    p_s = next(s for s, h in scored
+               if h.get("trackId") == primary.get("trackId"))
+    if not clean and _is_explicit(primary):
+        try:
+            fb = itunes_search(stem + " clean")
+        except Exception:
+            fb = []
+        anchor = first_content_token(stem)
+        fb_scored = []
+        for h in fb:
+            if not _is_clean(h) or h.get("trackId") == primary.get("trackId"):
+                continue
+            a_toks = tokens(h.get("artistName", ""))
+            if not a_toks:
+                continue
+            cov = sum(1 for t in a_toks if t in s_set) / len(a_toks)
+            if cov < 0.5:
+                continue
+            if anchor and anchor not in set(tokens(h.get("trackName", ""))):
+                continue
+            fb_scored.append((0.6, h))
+        if fb_scored:
+            clean = fb_scored[0][1]
+    return primary, clean, p_s
+
+
+def _hit_info(h):
+    if not h:
+        return None
+    return {"artist": h.get("artistName"), "title": h.get("trackName"),
+            "url": h.get("trackViewUrl"),
+            "explicit": _is_explicit(h)}
 
 
 def find_link(filename):
-    """Return (match_dict_or_None, score, display_label)."""
+    """Return (primary_or_None, clean_alt_or_None, score, display_label)."""
     stem = clean_stem(filename)
     if " - " in stem:
         artist, title = stem.split(" - ", 1)
         label = f"{artist.strip()} - {title.strip()}"
-        match, score = match_dash_split(artist.strip(), title.strip())
+        primary, clean, score = match_dash_split(artist.strip(), title.strip())
     else:
         label = stem
-        match, score = match_whole_stem(stem)
-    return match, score, label
+        primary, clean, score = match_whole_stem(stem)
+    return _hit_info(primary), _hit_info(clean), score, label
 
 
 def crate_links(crate_path, progress_cb=None, delay=0.3):
-    """Yield (label, match_or_None, score) for each track in the crate."""
+    """Yield (label, primary_or_None, clean_alt_or_None, score) per track."""
     import time
     tracks = parse_crate(crate_path)
     for i, ptrk in enumerate(tracks):
         filename = ptrk.replace("\\", "/").split("/")[-1]
         if progress_cb:
             progress_cb(i + 1, len(tracks), filename)
-        match, score, label = find_link(filename)
-        yield label, match, score
+        primary, clean, score, label = find_link(filename)
+        yield label, primary, clean, score
         time.sleep(delay)

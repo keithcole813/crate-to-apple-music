@@ -18,6 +18,8 @@ h1 {{ color:#f5c518; font-size:1.3em; }}
          padding:12px 14px; margin:8px 0; color:#fff; text-decoration:none; }}
 .song small {{ color:#999; display:block; margin-top:2px; }}
 .miss {{ background:#2a1a1a; color:#c99; padding:12px 14px; border-radius:10px; margin:8px 0; }}
+.clean {{ display:block; color:#f5c518; font-size:.85em; margin:-4px 0 8px;
+          text-decoration:none; padding:0 14px; }}
 </style></head><body>
 <h1>{crate} — Apple Music</h1>
 <p>{found} of {total} found for streaming.</p>
@@ -37,16 +39,21 @@ def main():
     def prog(i, n, name):
         print(f"[{i}/{n}] {name[:60]}")
 
-    for label, match, score in crate_links(args.crate, progress_cb=prog):
+    for label, primary, clean, score in crate_links(args.crate, progress_cb=prog):
         total += 1
-        if match:
+        if primary:
             found += 1
-            url = match["trackViewUrl"]
-            print(f"  -> {match['artistName']} - {match['trackName']} ({score:.2f})")
-            items.append(
-                f'<a class="song" href="{html.escape(url)}">'
-                f"{html.escape(match['artistName'])} — {html.escape(match['trackName'])}"
-                f"<small>for: {html.escape(label)}</small></a>")
+            url = primary["url"]
+            tag = " [explicit]" if primary.get("explicit") else ""
+            print(f"  -> {primary['artist']} - {primary['title']}{tag} ({score:.2f})")
+            item = (f'<a class="song" href="{html.escape(url)}">'
+                    f"{html.escape(primary['artist'])} — {html.escape(primary['title'])}"
+                    f"<small>for: {html.escape(label)}</small></a>")
+            if clean:
+                print(f"     clean for radio: {clean['url']}")
+                item += (f'<a class="clean" href="{html.escape(clean["url"])}">'
+                         f"clean version for radio &nearr;</a>")
+            items.append(item)
         else:
             print(f"  NOTE: not available on Apple Music ({score:.2f})")
             items.append(

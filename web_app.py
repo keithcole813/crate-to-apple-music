@@ -39,6 +39,8 @@ button{background:#f5c518;border:0;border-radius:10px;padding:14px 20px;
       margin:8px 0;color:#fff;text-decoration:none}
 .song small{color:#999;display:block;margin-top:2px}
 .miss{background:#2a1a1a;color:#c99;padding:12px 14px;border-radius:10px;margin:8px 0}
+.clean{display:block;color:#f5c518;font-size:.85em;margin:-4px 0 8px;
+       text-decoration:none;padding:0 14px}
 </style></head><body>
 <h1>📱 Crate → Apple Music</h1>
 <div class="card">
@@ -98,14 +100,17 @@ def _run(job_id):
     try:
         def prog(i, n, name):
             job["status"] = f"Checking {i}/{n}…"
-        for label, match, score in crate_links(job["tmp"], progress_cb=prog):
+        for label, primary, clean, score in crate_links(job["tmp"], progress_cb=prog):
             job["total"] += 1
-            if match:
+            if primary:
                 job["found"] += 1
-                job["items"].append(
-                    f'<a class="song" href="{esc(match["trackViewUrl"])}">'
-                    f"{esc(match['artistName'])} — {esc(match['trackName'])}"
-                    f"<small>for: {esc(label)}</small></a>")
+                item = (f'<a class="song" href="{esc(primary["url"])}">'
+                        f"{esc(primary['artist'])} — {esc(primary['title'])}"
+                        f"<small>for: {esc(label)}</small></a>")
+                if clean:
+                    item += (f'<a class="clean" href="{esc(clean["url"])}">'
+                             f"🧼 clean version for radio ↗</a>")
+                job["items"].append(item)
             else:
                 job["items"].append(
                     f'<div class="miss">⚠️ Not on Apple Music: {esc(label)}</div>')
